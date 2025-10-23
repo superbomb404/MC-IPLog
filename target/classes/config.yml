@@ -7,9 +7,9 @@ storage:
   mysql:
     host: "localhost"
     port: 3306
-    database: "minecraft"
-    username: "minecraft"
-    password: "password"
+    database: ""
+    username: ""
+    password: ""
     table-prefix: "iplog_"
     ssl: false
     reconnect: true

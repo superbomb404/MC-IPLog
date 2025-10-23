@@ -1,5 +1,5 @@
 name: IPLog
-version: '1.0-SNAPSHOT'
+version: '1.0'
 main: ljsure.cn.IPLog
 api-version: '1.20'
 load: STARTUP
@@ -9,6 +9,7 @@ commands:
     description: 查询玩家的IP信息
     usage: /<command> <玩家名>
     permission: iplog.query
+
 permissions:
   iplog.query:
     description: 允许查询玩家IP信息
