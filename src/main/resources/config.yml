@@ -1,0 +1,45 @@
+# 存储类型配置 (yaml 或 mysql)
+storage:
+  type: "yaml"  # yaml 或 mysql
+  # YAML存储配置
+  data-file: "data.yml"
+  # MySQL存储配置
+  mysql:
+    host: "localhost"
+    port: 3306
+    database: "minecraft"
+    username: "minecraft"
+    password: "password"
+    table-prefix: "iplog_"
+    ssl: false
+    reconnect: true
+    # 连接池设置
+    connection-pool:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+# IP查询API配置
+api:
+  url: "https://api.ipplus360.com/ip/geo/v1/city/"
+  key: "your_api_key_here"
+  timeout: 5000
+
+# 插件功能配置
+features:
+  auto-log-on-join: true
+  query-ip-location: true
+  # 是否启用IP重复检查（避免重复查询相同IP）
+  check-duplicate-ip: true
+
+# 数据存储配置
+data:
+  log-ip-history: true
+  max-history-size: 100
+
+# 调试配置
+debug:
+  enabled: false
+  level: "INFO"
