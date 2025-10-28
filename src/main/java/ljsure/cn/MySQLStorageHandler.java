@@ -5,60 +5,163 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.sql.*;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.Properties;
 import java.util.TimeZone;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 
 public class MySQLStorageHandler implements StorageHandler {
     private final JavaPlugin plugin;
-    private Connection connection;
-    private String tablePrefix;
-    private SimpleDateFormat dateFormat;
+    private final BlockingQueue<Connection> connectionPool;
+    private final int poolSize = 5;
+    private final String tablePrefix;
+    private final SimpleDateFormat dateFormat;
+
+    // 数据库连接参数
+    private final String host;
+    private final int port;
+    private final String database;
+    private final String username;
+    private final String password;
+    private final boolean ssl;
+    private final String connectionUrl;
 
     public MySQLStorageHandler(JavaPlugin plugin) {
         this.plugin = plugin;
+        this.connectionPool = new ArrayBlockingQueue<>(poolSize);
         this.dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         this.dateFormat.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai"));
+
+        // 读取配置
+        this.host = plugin.getConfig().getString("storage.mysql.host", "localhost");
+        this.port = plugin.getConfig().getInt("storage.mysql.port", 3306);
+        this.database = plugin.getConfig().getString("storage.mysql.database", "minecraft");
+        this.username = plugin.getConfig().getString("storage.mysql.username", "minecraft");
+        this.password = plugin.getConfig().getString("storage.mysql.password", "password");
+        this.tablePrefix = plugin.getConfig().getString("storage.mysql.table-prefix", "iplog_");
+        this.ssl = plugin.getConfig().getBoolean("storage.mysql.ssl", false);
+
+        // 构建连接URL
+        this.connectionUrl = "jdbc:mysql://" + host + ":" + port + "/" + database +
+                "?useSSL=" + ssl +
+                "&useUnicode=true" +
+                "&characterEncoding=UTF-8" +
+                "&autoReconnect=true" +
+                "&failOverReadOnly=false" +
+                "&maxReconnects=10" +
+                "&initialTimeout=5" +
+                "&connectTimeout=30000" +
+                "&socketTimeout=30000";
     }
 
     @Override
     public void initialize() throws Exception {
-        String host = plugin.getConfig().getString("storage.mysql.host", "localhost");
-        int port = plugin.getConfig().getInt("storage.mysql.port", 3306);
-        String database = plugin.getConfig().getString("storage.mysql.database", "minecraft");
-        String username = plugin.getConfig().getString("storage.mysql.username", "minecraft");
-        String password = plugin.getConfig().getString("storage.mysql.password", "password");
-        tablePrefix = plugin.getConfig().getString("storage.mysql.table-prefix", "iplog_");
-        boolean ssl = plugin.getConfig().getBoolean("storage.mysql.ssl", false);
+        plugin.getLogger().info("初始化MySQL连接池: " + host + ":" + port + "/" + database);
 
-        String url = "jdbc:mysql://" + host + ":" + port + "/" + database +
-                "?useSSL=" + ssl + "&useUnicode=true&characterEncoding=UTF-8";
+        // 初始化连接池
+        for (int i = 0; i < poolSize; i++) {
+            Connection connection = createConnection();
+            if (connection != null) {
+                connectionPool.offer(connection);
+            }
+        }
 
-        plugin.getLogger().info("连接MySQL数据库: " + host + ":" + port + "/" + database);
+        if (connectionPool.size() == 0) {
+            throw new Exception("无法创建任何数据库连接");
+        }
 
-        try {
-            connection = DriverManager.getConnection(url, username, password);
-            createTables();
-            plugin.getLogger().info("MySQL存储系统已初始化");
-        } catch (SQLException e) {
-            plugin.getLogger().log(Level.SEVERE, "连接MySQL数据库失败: " + e.getMessage(), e);
-            throw e;
+        // 创建表结构
+        try (Connection connection = getConnection()) {
+            createTables(connection);
+            plugin.getLogger().info("MySQL存储系统已初始化，连接池大小: " + connectionPool.size());
         }
     }
 
     @Override
     public void shutdown() {
-        if (connection != null) {
+        plugin.getLogger().info("关闭MySQL连接池...");
+        while (!connectionPool.isEmpty()) {
             try {
-                connection.close();
-                plugin.getLogger().info("MySQL连接已关闭");
-            } catch (SQLException e) {
-                plugin.getLogger().log(Level.WARNING, "关闭MySQL连接时出错: " + e.getMessage(), e);
+                Connection connection = connectionPool.take();
+                if (connection != null && !connection.isClosed()) {
+                    connection.close();
+                }
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "关闭数据库连接时出错: " + e.getMessage(), e);
+            }
+        }
+        plugin.getLogger().info("MySQL连接池已关闭");
+    }
+
+    private Connection createConnection() throws SQLException {
+        try {
+            Properties props = new Properties();
+            props.setProperty("user", username);
+            props.setProperty("password", password);
+            props.setProperty("autoReconnect", "true");
+            props.setProperty("maxReconnects", "10");
+            props.setProperty("initialTimeout", "5");
+
+            Connection connection = DriverManager.getConnection(connectionUrl, props);
+
+            // 测试连接是否有效
+            try (Statement stmt = connection.createStatement()) {
+                stmt.executeQuery("SELECT 1");
+            }
+
+            return connection;
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "创建数据库连接失败: " + e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    private Connection getConnection() throws SQLException {
+        try {
+            // 尝试从连接池获取连接，最多等待5秒
+            Connection connection = connectionPool.poll(5, TimeUnit.SECONDS);
+
+            if (connection == null) {
+                // 连接池为空，创建新连接
+                plugin.getLogger().warning("连接池为空，创建新连接");
+                return createConnection();
+            }
+
+            // 检查连接是否有效
+            if (connection.isClosed() || !connection.isValid(2)) {
+                plugin.getLogger().info("连接无效，创建新连接");
+                try {
+                    connection.close();
+                } catch (SQLException e) {
+                    // 忽略关闭异常
+                }
+                return createConnection();
+            }
+
+            return connection;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("获取数据库连接时被中断", e);
+        }
+    }
+
+    private void returnConnection(Connection connection) {
+        if (connection != null) {
+            // 如果连接池已满，直接关闭连接
+            if (!connectionPool.offer(connection)) {
+                try {
+                    connection.close();
+                } catch (SQLException e) {
+                    plugin.getLogger().log(Level.WARNING, "关闭数据库连接时出错: " + e.getMessage(), e);
+                }
             }
         }
     }
 
-    private void createTables() throws SQLException {
+    private void createTables(Connection connection) throws SQLException {
         try (Statement stmt = connection.createStatement()) {
             // 创建玩家表
             String playersTable = tablePrefix + "players";
@@ -98,6 +201,18 @@ public class MySQLStorageHandler implements StorageHandler {
 
     @Override
     public void savePlayerData(PlayerData playerData) {
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            savePlayerDataInternal(connection, playerData);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "保存玩家数据到MySQL失败: " + e.getMessage(), e);
+        } finally {
+            returnConnection(connection);
+        }
+    }
+
+    private void savePlayerDataInternal(Connection connection, PlayerData playerData) {
         String playersTable = tablePrefix + "players";
         String ipHistoryTable = tablePrefix + "ip_history";
 
@@ -164,23 +279,44 @@ public class MySQLStorageHandler implements StorageHandler {
 
             // 提交事务
             connection.commit();
-            connection.setAutoCommit(true);
 
         } catch (SQLException e) {
             try {
-                connection.rollback();
-                connection.setAutoCommit(true);
+                if (connection != null) {
+                    connection.rollback();
+                }
             } catch (SQLException ex) {
                 plugin.getLogger().log(Level.SEVERE, "回滚事务失败: " + ex.getMessage(), ex);
             }
-            plugin.getLogger().log(Level.SEVERE, "保存玩家数据到MySQL失败: " + e.getMessage(), e);
+            throw new RuntimeException("保存玩家数据失败", e);
         } catch (ParseException e) {
             plugin.getLogger().log(Level.SEVERE, "时间戳格式错误: " + e.getMessage(), e);
+        } finally {
+            try {
+                if (connection != null) {
+                    connection.setAutoCommit(true);
+                }
+            } catch (SQLException e) {
+                plugin.getLogger().log(Level.WARNING, "恢复自动提交模式失败: " + e.getMessage(), e);
+            }
         }
     }
 
     @Override
     public PlayerData loadPlayerData(UUID uuid) {
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            return loadPlayerDataInternal(connection, uuid);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "从MySQL加载玩家数据失败: " + e.getMessage(), e);
+            return null;
+        } finally {
+            returnConnection(connection);
+        }
+    }
+
+    private PlayerData loadPlayerDataInternal(Connection connection, UUID uuid) {
         String playersTable = tablePrefix + "players";
         String ipHistoryTable = tablePrefix + "ip_history";
 
@@ -235,6 +371,19 @@ public class MySQLStorageHandler implements StorageHandler {
 
     @Override
     public PlayerData findPlayerDataByName(String playerName) {
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            return findPlayerDataByNameInternal(connection, playerName);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "按名称查找玩家数据失败: " + e.getMessage(), e);
+            return null;
+        } finally {
+            returnConnection(connection);
+        }
+    }
+
+    private PlayerData findPlayerDataByNameInternal(Connection connection, String playerName) {
         String playersTable = tablePrefix + "players";
 
         try {
@@ -244,7 +393,7 @@ public class MySQLStorageHandler implements StorageHandler {
 
                 try (ResultSet rs = stmt.executeQuery()) {
                     if (rs.next()) {
-                        return loadPlayerData(UUID.fromString(rs.getString("uuid")));
+                        return loadPlayerDataInternal(connection, UUID.fromString(rs.getString("uuid")));
                     }
                 }
             }
@@ -257,6 +406,19 @@ public class MySQLStorageHandler implements StorageHandler {
 
     @Override
     public IPRecord getLastIPRecord(UUID uuid) {
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            return getLastIPRecordInternal(connection, uuid);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "获取最后IP记录失败: " + e.getMessage(), e);
+            return null;
+        } finally {
+            returnConnection(connection);
+        }
+    }
+
+    private IPRecord getLastIPRecordInternal(Connection connection, UUID uuid) {
         String ipHistoryTable = tablePrefix + "ip_history";
 
         try {
@@ -286,6 +448,19 @@ public class MySQLStorageHandler implements StorageHandler {
 
     @Override
     public boolean isIPRecorded(UUID uuid, String ip) {
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            return isIPRecordedInternal(connection, uuid, ip);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "检查IP记录失败: " + e.getMessage(), e);
+            return false;
+        } finally {
+            returnConnection(connection);
+        }
+    }
+
+    private boolean isIPRecordedInternal(Connection connection, UUID uuid, String ip) {
         String ipHistoryTable = tablePrefix + "ip_history";
 
         try {

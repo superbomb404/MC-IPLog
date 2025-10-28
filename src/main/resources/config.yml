@@ -12,7 +12,6 @@ storage:
     password: ""
     table-prefix: "iplog_"
     ssl: false
-    reconnect: true
     # 连接池设置
     connection-pool:
       maximum-pool-size: 10
